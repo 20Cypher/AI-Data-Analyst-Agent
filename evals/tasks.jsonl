@@ -1,0 +1,8 @@
+{"id": 1, "dataset_id": "sales", "question": "What are monthly sales trends in 2023? Include a line chart.", "assertions": ["chart_created", "monthly_aggregation", "trend_analysis"]}
+{"id": 2, "dataset_id": "sales", "question": "Compare average order value by region with a bar chart.", "assertions": ["chart_created", "regional_analysis", "average_calculation"]}
+{"id": 3, "dataset_id": "sales", "question": "Show top 5 product categories by total sales.", "assertions": ["aggregation_result", "top_5_ranking", "category_analysis"]}
+{"id": 4, "dataset_id": "nyc_taxi_sample", "question": "What is the average trip distance and fare amount?", "assertions": ["average_calculation", "distance_analysis", "fare_analysis"]}
+{"id": 5, "dataset_id": "nyc_taxi_sample", "question": "Show distribution of passenger counts with a bar chart.", "assertions": ["chart_created", "distribution_analysis", "passenger_analysis"]}
+{"id": 6, "dataset_id": "sales", "question": "Identify outliers in unit prices with a boxplot.", "assertions": ["chart_created", "outlier_detection", "boxplot_visualization"]}
+{"id": 7, "dataset_id": "nyc_taxi_sample", "question": "Compare tip amounts by payment type.", "assertions": ["payment_analysis", "tip_analysis", "comparison_made"]}
+{"id": 8, "dataset_id": "sales", "question": "What is the relationship between quantity and total sales?", "assertions": ["correlation_analysis", "relationship_analysis", "scatter_plot"]}
