@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional, Callable
 from pathlib import Path
 import os
 import signal
+import re  # <-- NEW
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,60 @@ class PythonREPLTool:
     @staticmethod
     def _raise_timeout(signum, frame):
         raise TimeoutError("Execution timed out")
-    
+
+    # ---------- NEW: helpers for robust date handling ----------
+    def _is_dateish(self, name: str) -> bool:
+        """Heuristic: does the column name look like a date/time?"""
+        n = name.lower()
+        return any(k in n for k in ["date", "time", "timestamp", "created", "updated"])
+
+    def _auto_parse_and_enrich_dates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Parse date-like columns and add useful date parts.
+        - For each detected date column 'col': col_year, col_month, col_day, col_week, col_quarter, col_ym
+        - Also create generic 'year','month','day','ym' from the first detected date column
+        """
+        df = df.copy()
+        date_cols: List[str] = []
+
+        for col in df.columns:
+            s = df[col]
+            looks_like_date = self._is_dateish(col) or pd.api.types.is_datetime64_any_dtype(s)
+
+            if looks_like_date or s.dtype == "object":
+                try:
+                    parsed = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+                except Exception:
+                    parsed = pd.to_datetime(s, errors="coerce")
+                # treat as date if name suggests it OR parsing succeeds for enough rows
+                if self._is_dateish(col) or parsed.notna().mean() > 0.6:
+                    df[col] = parsed
+                    date_cols.append(col)
+
+        for col in date_cols:
+            df[f"{col}_year"]    = df[col].dt.year
+            df[f"{col}_month"]   = df[col].dt.month
+            df[f"{col}_day"]     = df[col].dt.day
+            # isocalendar().week returns UInt; cast to nullable int to avoid dtype issues
+            df[f"{col}_week"]    = df[col].dt.isocalendar().week.astype("Int64")
+            df[f"{col}_quarter"] = df[col].dt.quarter
+            df[f"{col}_ym"]      = df[col].dt.to_period("M").astype(str)
+
+        # Provide generic names for the first detected date column
+        if date_cols:
+            primary = date_cols[0]
+            if "year" not in df.columns:
+                df["year"] = df[f"{primary}_year"]
+            if "month" not in df.columns:
+                df["month"] = df[f"{primary}_month"]
+            if "day" not in df.columns:
+                df["day"] = df[f"{primary}_day"]
+            if "ym" not in df.columns:
+                df["ym"] = df[f"{primary}_ym"]
+
+        return df
+    # -----------------------------------------------------------
+
     def exec(self, code: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """Execute Python code with restricted environment + timeout + output truncation."""
         try:
@@ -100,7 +154,10 @@ class PythonREPLTool:
             dataset_path = self._get_dataset_path(context)
             df = self._load_dataset(dataset_path)
 
-            # Apply operations
+            # NEW: Auto-parse dates and add date parts up-front
+            df = self._auto_parse_and_enrich_dates(df)
+
+            # Apply operations (existing DSL still supported)
             for op in operations:
                 df = self._apply_operation(df, op)
 
@@ -188,6 +245,13 @@ class PythonREPLTool:
             if column in df.columns:
                 df = df.copy()
                 df[column] = pd.to_datetime(df[column], errors='coerce')
+                # also add date parts for that column
+                df[f"{column}_year"]    = df[column].dt.year
+                df[f"{column}_month"]   = df[column].dt.month
+                df[f"{column}_day"]     = df[column].dt.day
+                df[f"{column}_week"]    = df[column].dt.isocalendar().week.astype("Int64")
+                df[f"{column}_quarter"] = df[column].dt.quarter
+                df[f"{column}_ym"]      = df[column].dt.to_period("M").astype(str)
                 
         elif operation.startswith("drop_na:"):
             column = operation.split(":", 1)[1].strip()
@@ -303,115 +367,107 @@ class PythonREPLTool:
 
 
     def _apply_filter(self, df: pd.DataFrame, condition: str) -> pd.DataFrame:
-        """Apply filter condition to DataFrame"""
+        """
+        Apply filter condition. Supports:
+        - simple comparisons (existing behavior)
+        - compound expressions with AND/OR via pandas.query(engine='python')
+        """
         try:
             df_copy = df.copy()
             c = condition.strip()
-            # contains: "<col> contains '<value>'"
-            idx = c.lower().find(" contains ")
-            if idx != -1:
-                col = c[:idx].strip()
-                val = c[idx+len(" contains "):].strip().strip("'\"")
-                if col in df.columns:
-                    return df[df[col].astype(str).str.contains(val, case=False, na=False)]
 
-            # isnull/notnull as suffix operators: "<col> isnull"
-            if c.lower().endswith(" isnull"):
-                col = c[: -len(" isnull")].strip()
-                if col in df.columns:
-                    return df[df[col].isnull()]
-            if c.lower().endswith(" notnull"):
-                col = c[: -len(" notnull")].strip()
-                if col in df.columns:
-                    return df[df[col].notnull()]
-                
-            # Handle different filter types
-            if "==" in condition:
-                column, value = condition.split("==", 1)
+            # If expression looks compound (AND/OR or quotes), try DataFrame.query first
+            looks_compound = bool(re.search(r"\bAND\b|\bOR\b", c, flags=re.IGNORECASE)) or ("'" in c or '"' in c)
+            if looks_compound:
+                q = re.sub(r"\bAND\b", "and", c, flags=re.IGNORECASE)
+                q = re.sub(r"\bOR\b", "or", q, flags=re.IGNORECASE)
+
+                # Columns with spaces/dashes must be backticked for query()
+                for col in df.columns:
+                    if " " in col or "-" in col:
+                        q = re.sub(rf"\b{re.escape(col)}\b", f"`{col}`", q)
+
+                try:
+                    return df.query(q, engine="python")
+                except Exception:
+                    # fall through to simple parser
+                    pass
+
+            # ---- simple single-clause parser (original behavior) ----
+            if "==" in c:
+                column, value = c.split("==", 1)
                 column = column.strip()
                 value = value.strip().strip("'\"")
-                
                 if column in df_copy.columns:
-                    # Try to convert value to appropriate type
-                    if df_copy[column].dtype in ['int64', 'float64']:
+                    if pd.api.types.is_numeric_dtype(df_copy[column]):
                         try:
                             value = float(value)
                         except ValueError:
                             pass
-                    
                     return df_copy[df_copy[column] == value]
-                    
-            elif "!=" in condition:
-                column, value = condition.split("!=", 1)
+
+            elif "!=" in c:
+                column, value = c.split("!=", 1)
                 column = column.strip()
                 value = value.strip().strip("'\"")
-                
                 if column in df_copy.columns:
-                    # Try to convert value to appropriate type
-                    if df_copy[column].dtype in ['int64', 'float64']:
+                    if pd.api.types.is_numeric_dtype(df_copy[column]):
                         try:
                             value = float(value)
                         except ValueError:
                             pass
-                    
                     return df_copy[df_copy[column] != value]
-                    
-            elif ">" in condition and not ">=" in condition:
-                column, value = condition.split(">", 1)
+
+            elif ">=" in c:
+                column, value = c.split(">=", 1)
                 column = column.strip()
                 value = float(value.strip())
-                
-                if column in df_copy.columns:
-                    return df_copy[df_copy[column] > value]
-                    
-            elif ">=" in condition:
-                column, value = condition.split(">=", 1)
-                column = column.strip()
-                value = float(value.strip())
-                
                 if column in df_copy.columns:
                     return df_copy[df_copy[column] >= value]
-                    
-            elif "<" in condition and not "<=" in condition:
-                column, value = condition.split("<", 1)
+
+            elif "<=" in c:
+                column, value = c.split("<=", 1)
                 column = column.strip()
                 value = float(value.strip())
-                
-                if column in df_copy.columns:
-                    return df_copy[df_copy[column] < value]
-                    
-            elif "<=" in condition:
-                column, value = condition.split("<=", 1)
-                column = column.strip()
-                value = float(value.strip())
-                
                 if column in df_copy.columns:
                     return df_copy[df_copy[column] <= value]
-                    
-            elif "contains" in condition.lower():
-                # Format: column contains 'value'
-                parts = condition.lower().split("contains", 1)
-                if len(parts) == 2:
-                    column = parts[0].strip()
-                    value = parts[1].strip().strip("'\"")
-                    
-                    if column in df_copy.columns:
-                        return df_copy[df_copy[column].astype(str).str.contains(value, na=False)]
-                        
-            elif "isnull" in condition.lower():
-                column = condition.lower().replace("isnull", "").strip()
+
+            elif ">" in c:
+                column, value = c.split(">", 1)
+                column = column.strip()
+                value = float(value.strip())
                 if column in df_copy.columns:
-                    return df_copy[df_copy[column].isnull()]
-                    
-            elif "notnull" in condition.lower():
-                column = condition.lower().replace("notnull", "").strip()
+                    return df_copy[df_copy[column] > value]
+
+            elif "<" in c:
+                column, value = c.split("<", 1)
+                column = column.strip()
+                value = float(value.strip())
                 if column in df_copy.columns:
-                    return df_copy[df_copy[column].notnull()]
-            
+                    return df_copy[df_copy[column] < value]
+
+            elif " contains " in c.lower():
+                # Format: "<col> contains '<value>'"
+                idx = c.lower().find(" contains ")
+                col = c[:idx].strip()
+                val = c[idx + len(" contains "):].strip().strip("'\"")
+                if col in df_copy.columns:
+                    return df_copy[df_copy[col].astype(str).str.contains(val, case=False, na=False)]
+
+            elif "isnull" in c.lower():
+                col = c.lower().replace("isnull", "").strip()
+                if col in df_copy.columns:
+                    return df_copy[df_copy[col].isnull()]
+
+            elif "notnull" in c.lower():
+                col = c.lower().replace("notnull", "").strip()
+                if col in df_copy.columns:
+                    return df_copy[df_copy[col].notnull()]
+
             # If no condition matched, log and return original DataFrame
             logger.warning(f"Could not parse filter condition: {condition}")
             return df_copy
-            
+
         except Exception as e:
             logger.error(f"Filter application failed: {e}")
             return df  # Return original DataFrame if filter fails

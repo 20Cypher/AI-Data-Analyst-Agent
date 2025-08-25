@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Dict, Any
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
-from ..agent.prompts import SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_TEMPLATE
-from ..agent.llm import build_llm
+from agent.prompts import SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_TEMPLATE
+from agent.llm import build_llm
 
 logger = logging.getLogger(__name__)
 
