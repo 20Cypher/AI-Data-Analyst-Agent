@@ -1,12 +1,12 @@
 # AI Data Analyst Agent
 
-A production-grade agentic system that transforms natural language questions into comprehensive analysis bundles containing Jupyter notebooks, charts, and narrative summaries.
+An agentic system that transforms natural language questions into comprehensive analysis bundles containing Jupyter notebooks, charts, and narrative summaries.
 
 ## Architecture
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Web Frontend  │────│  FastAPI Backend │────│ Agent Controller │
+│   Web Frontend  │────│  FastAPI Backend│────│ Agent Controller│
 │  (HTML/JS/CSS)  │    │   (REST API)    │    │ (Plan→Act→Obs)  │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                                                         │
@@ -111,7 +111,7 @@ Key environment variables in `.env`:
 OPENAI_API_KEY=your_key_here
 MAX_TOOL_CALLS=20
 MAX_RUNTIME_SECONDS=300
-MODEL_NAME=gpt-4
+MODEL_NAME=gpt-4o-mini
 ```
 
 ## Supported Analysis Types
@@ -208,46 +208,10 @@ def _create_custom_chart(self, df, params, ax):
 4. Run evaluation suite: `python -m evals.run_evals`
 5. Submit pull request with test results
 
-## License
-
-MIT License - see LICENSE file for details.
-
 ---
 
-**Built with:** FastAPI, pandas, DuckDB, matplotlib, OpenAI GPT-4, LangChain
-```
+**Built with:** FastAPI, pandas, DuckDB, matplotlib, OpenAI GPT-4o-mini, LangChain
 
-### Dockerfile
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY . .
-
-# Create directories
-RUN mkdir -p data artifacts
-
-# Expose port
-EXPOSE 8000
-
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV ARTIFACTS_DIR=/app/artifacts
-ENV DATA_DIR=/app/data
-
-# Run the application
-CMD ["uvicorn", "web.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 This completes the full implementation of the AI Data Analyst Agent system. The codebase includes:
@@ -259,6 +223,3 @@ This completes the full implementation of the AI Data Analyst Agent system. The 
 5. **Evaluation Suite**: Automated testing with metrics
 6. **Documentation**: Complete README with setup instructions
 7. **Testing**: Unit tests for core components
-8. **Docker Support**: Containerized deployment
-
-The system is production-ready with proper error handling, validation, observability, and security measures. It can be deployed locally or in containers and provides a complete data analysis workflow from natural language questions to reproducible analysis bundles.
