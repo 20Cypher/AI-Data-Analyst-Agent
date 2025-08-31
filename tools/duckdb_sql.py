@@ -9,6 +9,18 @@ import re
 
 logger = logging.getLogger(__name__)
 
+_AGG_FUNCS = {"sum", "avg", "count", "min", "max", "median", "stddev", "std", "var", "variance"}
+
+def _looks_aggregate(sql: str) -> bool:
+    s = sql.lower()
+    # crude but robust: presence of group by or any agg func pattern
+    if " group by " in s:
+        return True
+    for fn in _AGG_FUNCS:
+        if re.search(rf"\b{fn}\s*\(", s):
+            return True
+    return False
+
 def _q(name: str) -> str:
     """Quote an identifier for DuckDB (safe for spaces/case/reserved words)."""
     # If already quoted, return as-is
@@ -106,7 +118,7 @@ class DuckDBTool:
             try:
                 self._register_sources(conn, sources)
                 df: pd.DataFrame = conn.execute(query).fetchdf()
-
+                is_agg = _looks_aggregate(query)
                 out_dir = self._frame_outdir(context)
                 qhash = hashlib.sha1(query.encode("utf-8")).hexdigest()[:12]
                 pickle_path = out_dir / f"result_{qhash}.pkl"
@@ -118,7 +130,10 @@ class DuckDBTool:
                     "preview": df.head().to_dict("records") if not df.empty else [],
                     "df_pickle_path": str(pickle_path),
                     "computed_values": self._extract_computed_values(df),
-                    "query": query,
+                    "metadata": {
+                        "is_aggregate": is_agg,
+                        "query": query,
+                    },
                 }
             finally:
                 conn.close()
@@ -219,8 +234,61 @@ class DuckDBTool:
 
             # Execute
             res = self.run(query, sources, context=context)
+            try:
+                df_agg = pd.read_pickle(res["df_pickle_path"])
+            except Exception:
+                df_agg = None
+
             res["group_by"] = group_by or []
-            res["metrics"] = metrics or []
+            res["metrics"]  = metrics or []
+            res["query"]    = query
+
+            # Always compute generic facts when we have a grouped result
+            if df_agg is not None and not df_agg.empty:
+                # Identify metric aliases that came from our SELECT building above.
+                # We already appended aliases such as sum_<col>, avg_<col>, count_* etc.
+                metric_aliases = []
+                for m in (res.get("columns") or []):
+                    # heuristics: metrics are numeric & not in group_by
+                    if (m not in (group_by or [])) and (m in df_agg.columns) and pd.api.types.is_numeric_dtype(df_agg[m]):
+                        metric_aliases.append(m)
+
+                computed = res.setdefault("computed_values", {})
+
+                # Top/Bottom rows for each metric alias (generic & reusable)
+                topk_all    = {}
+                bottomk_all = {}
+                extrema_all = {}
+                for alias in metric_aliases:
+                    # Top/bottom 5 by this metric
+                    topk = df_agg.nlargest(min(5, len(df_agg)), alias).to_dict("records")
+                    botk = df_agg.nsmallest(min(5, len(df_agg)), alias).to_dict("records")
+                    topk_all[alias] = topk
+                    bottomk_all[alias] = botk
+
+                    # Exact max/min singletons
+                    i_max = df_agg[alias].idxmax()
+                    i_min = df_agg[alias].idxmin()
+                    extrema_all[alias] = {
+                        "max_row": df_agg.loc[i_max].to_dict(),
+                        "min_row": df_agg.loc[i_min].to_dict(),
+                        "max_value": float(df_agg.loc[i_max, alias]),
+                        "min_value": float(df_agg.loc[i_min, alias]),
+                    }
+
+                computed["topk"] = topk_all
+                computed["bottomk"] = bottomk_all
+                computed["extrema"] = extrema_all
+
+                # Also include a light schema echo for downstream consumers
+                computed["group_by_columns"] = group_by or []
+                computed["metric_columns"]   = metric_aliases
+                res.setdefault("metadata", {})
+                res["metadata"].update({
+                    "is_aggregate": True,
+                    "group_by": group_by or [],
+                    "metrics": metric_aliases if "metric_aliases" in locals() else metrics,
+                })
             return res
 
         except Exception as e:

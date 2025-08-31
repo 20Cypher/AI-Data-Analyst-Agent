@@ -108,25 +108,33 @@ class FileIOTool:
             }
     
     def _format_context_for_summary(self, context: Any) -> str:
-        """Format context information for summary generation"""
         lines = [f"Dataset: {context.dataset_id}"]
-        
-        # Add computed values
+
+        # Computed values (flat)
         if hasattr(context, 'computed_values') and context.computed_values:
             lines.append("Computed Values:")
             for key, value in context.computed_values.items():
-                lines.append(f"- {key}: {value}")
-        
-        # Add available artifacts
-        if hasattr(context, 'artifacts') and context.artifacts:
+                # For nested dicts like topk/extrema show compact JSON-ish
+                if key in ("topk", "bottomk", "extrema"):
+                    import json
+                    try:
+                        snippet = json.dumps(value, default=str)[:4000]
+                    except Exception:
+                        snippet = str(value)[:4000]
+                    lines.append(f"- {key}: {snippet}")
+                else:
+                    lines.append(f"- {key}: {value}")
+
+        # Artifacts
+        if getattr(context, 'artifacts', None):
             lines.append("Generated Artifacts:")
             for artifact_type, path in context.artifacts.items():
                 lines.append(f"- {artifact_type}: {path}")
-        
-        # Add DataFrame info
-        if hasattr(context, 'dataframes') and context.dataframes:
+
+        # DataFrames
+        if getattr(context, 'dataframes', None):
             lines.append("DataFrames:")
             for name, path in context.dataframes.items():
                 lines.append(f"- {name}: {path}")
-        
+
         return "\n".join(lines)

@@ -1,4 +1,20 @@
-.env
-venv/
-.env/
+# ========== Python ===========
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ========= Environments ============
 .venv/
+venv/
+.env
+.env.*
+
+# ========== Project outputs ===========
+artifacts/
+
+# ========= Notebooks & editor noise ============
+*.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+*.swp

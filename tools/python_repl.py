@@ -368,106 +368,147 @@ class PythonREPLTool:
 
     def _apply_filter(self, df: pd.DataFrame, condition: str) -> pd.DataFrame:
         """
-        Apply filter condition. Supports:
-        - simple comparisons (existing behavior)
-        - compound expressions with AND/OR via pandas.query(engine='python')
+        Apply a simple SQL‑like filter safely.
+        Supports:
+        - col == 'x', !=, >, >=, <, <=
+        - col CONTAINS 'x' (case‑insensitive)
+        - col ISNULL / NOTNULL
+        - col BETWEEN a AND b    (a/b can be numbers or dates in 'YYYY‑MM‑DD')
+        - Chaining with AND / OR  (left‑to‑right, AND > OR precedence)
         """
         try:
-            df_copy = df.copy()
-            c = condition.strip()
+            # Normalize whitespace but keep case for column names
+            c = " ".join(condition.strip().split())
 
-            # If expression looks compound (AND/OR or quotes), try DataFrame.query first
-            looks_compound = bool(re.search(r"\bAND\b|\bOR\b", c, flags=re.IGNORECASE)) or ("'" in c or '"' in c)
-            if looks_compound:
-                q = re.sub(r"\bAND\b", "and", c, flags=re.IGNORECASE)
-                q = re.sub(r"\bOR\b", "or", q, flags=re.IGNORECASE)
+            # 1) Split on OR (lowest precedence)
+            parts_or = self._split_outside_quotes(c, " OR ")
+            if len(parts_or) > 1:
+                mask = pd.Series(False, index=df.index)
+                for part in parts_or:
+                    mask = mask | self._eval_and_chain(df, part)
+                return df[mask]
 
-                # Columns with spaces/dashes must be backticked for query()
-                for col in df.columns:
-                    if " " in col or "-" in col:
-                        q = re.sub(rf"\b{re.escape(col)}\b", f"`{col}`", q)
-
-                try:
-                    return df.query(q, engine="python")
-                except Exception:
-                    # fall through to simple parser
-                    pass
-
-            # ---- simple single-clause parser (original behavior) ----
-            if "==" in c:
-                column, value = c.split("==", 1)
-                column = column.strip()
-                value = value.strip().strip("'\"")
-                if column in df_copy.columns:
-                    if pd.api.types.is_numeric_dtype(df_copy[column]):
-                        try:
-                            value = float(value)
-                        except ValueError:
-                            pass
-                    return df_copy[df_copy[column] == value]
-
-            elif "!=" in c:
-                column, value = c.split("!=", 1)
-                column = column.strip()
-                value = value.strip().strip("'\"")
-                if column in df_copy.columns:
-                    if pd.api.types.is_numeric_dtype(df_copy[column]):
-                        try:
-                            value = float(value)
-                        except ValueError:
-                            pass
-                    return df_copy[df_copy[column] != value]
-
-            elif ">=" in c:
-                column, value = c.split(">=", 1)
-                column = column.strip()
-                value = float(value.strip())
-                if column in df_copy.columns:
-                    return df_copy[df_copy[column] >= value]
-
-            elif "<=" in c:
-                column, value = c.split("<=", 1)
-                column = column.strip()
-                value = float(value.strip())
-                if column in df_copy.columns:
-                    return df_copy[df_copy[column] <= value]
-
-            elif ">" in c:
-                column, value = c.split(">", 1)
-                column = column.strip()
-                value = float(value.strip())
-                if column in df_copy.columns:
-                    return df_copy[df_copy[column] > value]
-
-            elif "<" in c:
-                column, value = c.split("<", 1)
-                column = column.strip()
-                value = float(value.strip())
-                if column in df_copy.columns:
-                    return df_copy[df_copy[column] < value]
-
-            elif " contains " in c.lower():
-                # Format: "<col> contains '<value>'"
-                idx = c.lower().find(" contains ")
-                col = c[:idx].strip()
-                val = c[idx + len(" contains "):].strip().strip("'\"")
-                if col in df_copy.columns:
-                    return df_copy[df_copy[col].astype(str).str.contains(val, case=False, na=False)]
-
-            elif "isnull" in c.lower():
-                col = c.lower().replace("isnull", "").strip()
-                if col in df_copy.columns:
-                    return df_copy[df_copy[col].isnull()]
-
-            elif "notnull" in c.lower():
-                col = c.lower().replace("notnull", "").strip()
-                if col in df_copy.columns:
-                    return df_copy[df_copy[col].notnull()]
-
-            # If no condition matched, log and return original DataFrame
-            logger.warning(f"Could not parse filter condition: {condition}")
-            return df_copy
+            # 2) Otherwise it's a pure AND chain (or single predicate)
+            return df[self._eval_and_chain(df, c)]
 
         except Exception as e:
             logger.error(f"Filter application failed: {e}")
-            return df  # Return original DataFrame if filter fails
+            return df
+
+    def _eval_and_chain(self, df: pd.DataFrame, clause: str) -> pd.Series:
+        """Evaluate a chain of AND‑ed predicates."""
+        parts_and = self._split_outside_quotes(clause, " AND ")
+        mask = pd.Series(True, index=df.index)
+        for p in parts_and:
+            mask = mask & self._eval_simple_predicate(df, p.strip())
+        return mask
+
+    def _split_outside_quotes(self, text: str, sep: str) -> List[str]:
+        """Split by sep ignoring separators inside single/double quotes."""
+        out, buf, q = [], [], None
+        i, n, m = 0, len(text), len(sep)
+        while i < n:
+            ch = text[i]
+            if q:
+                buf.append(ch)
+                if ch == q:
+                    q = None
+                i += 1
+            else:
+                if ch in ("'", '"'):
+                    q = ch
+                    buf.append(ch)
+                    i += 1
+                elif text[i:i+m] == sep:
+                    out.append("".join(buf).strip())
+                    buf = []
+                    i += m
+                else:
+                    buf.append(ch)
+                    i += 1
+        out.append("".join(buf).strip())
+        return out
+
+    def _parse_literal(self, s: str):
+        """Parse numeric or date literal; fallback to raw string."""
+        t = s.strip().strip("'\"")
+        # Try number
+        try:
+            return float(t) if "." in t else int(t)
+        except Exception:
+            pass
+        # Try date
+        try:
+            return pd.to_datetime(t)
+        except Exception:
+            pass
+        return t
+
+    def _eval_simple_predicate(self, df: pd.DataFrame, pred: str) -> pd.Series:
+        """Evaluate one predicate like "col >= 5", "date BETWEEN '2023-01-01' AND '2023-12-31'"."""
+        p = pred.strip()
+
+        # BETWEEN
+        if " BETWEEN " in p.upper():
+            # col BETWEEN a AND b
+            left, rest = self._split_outside_quotes(p, " BETWEEN ")
+            if " AND " not in rest.upper():
+                return pd.Series(True, index=df.index)
+            a, b = self._split_outside_quotes(rest, " AND ")
+            col = left.strip()
+            if col not in df.columns:
+                return pd.Series(True, index=df.index)
+            lo = self._parse_literal(a)
+            hi = self._parse_literal(b)
+            series = df[col]
+            # If both parse as datetimes, coerce series as datetime too
+            if isinstance(lo, pd.Timestamp) or isinstance(hi, pd.Timestamp):
+                series = pd.to_datetime(series, errors="coerce")
+            return (series >= lo) & (series <= hi)
+
+        # CONTAINS (case‑insensitive)
+        low = p.lower()
+        idx = low.find(" contains ")
+        if idx != -1:
+            col = p[:idx].strip()
+            val = p[idx+len(" contains "):].strip().strip("'\"")
+            if col not in df.columns:
+                return pd.Series(True, index=df.index)
+            return df[col].astype(str).str.contains(val, case=False, na=False)
+
+        # ISNULL / NOTNULL
+        if low.endswith(" isnull"):
+            col = p[:-len(" isnull")].strip()
+            return df[col].isnull() if col in df.columns else pd.Series(True, index=df.index)
+        if low.endswith(" notnull"):
+            col = p[:-len(" notnull")].strip()
+            return df[col].notnull() if col in df.columns else pd.Series(True, index=df.index)
+
+        # Binary comparisons (order of ops matters)
+        for op in ["<=", ">=", "==", "!=", "<", ">"]:
+            if op in p:
+                col, lit = p.split(op, 1)
+                col = col.strip()
+                if col not in df.columns:
+                    return pd.Series(True, index=df.index)
+                series = df[col]
+                rhs = self._parse_literal(lit)
+                # If rhs is a date, coerce series to datetime
+                if isinstance(rhs, pd.Timestamp):
+                    series = pd.to_datetime(series, errors="coerce")
+                try:
+                    if op == "==": return series == rhs
+                    if op == "!=": return series != rhs
+                    if op == ">":  return series >  rhs
+                    if op == ">=": return series >= rhs
+                    if op == "<":  return series <  rhs
+                    if op == "<=": return series <= rhs
+                except Exception:
+                    # Type mismatch → try numeric coercion if possible
+                    try:
+                        return pd.to_numeric(series, errors="coerce").map(lambda x: x).__getattribute__({">": "__gt__", ">=": "__ge__", "<": "__lt__", "<=": "__le__"}[op])(rhs)
+                    except Exception:
+                        return pd.Series(True, index=df.index)
+        # Unknown → pass-through
+        logger.warning(f"Could not parse predicate: {pred}")
+        return pd.Series(True, index=df.index)

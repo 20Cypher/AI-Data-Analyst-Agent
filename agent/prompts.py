@@ -51,8 +51,12 @@ CRITICAL RULES:
 3. Be specific and cite actual computed values
 4. If no clear insights emerge from the data, state that explicitly
 5. Keep the summary concise but informative
+6. If `computed_values.extrema` is present, explicitly state the max/min item(s) with their values and the group keys.
+7. If `computed_values.topk` is present, mention the top item(s) and how they compare.
+8. If the user’s question asks “which/top/bottom/most/least”, you MUST name the item(s) achieving the requested extremum.
 
 Your summary will be saved as summary.md and included in the analysis bundle."""
+
 
 SUMMARY_USER_TEMPLATE = """Based on the following analysis context, write a concise summary of the findings:
 
