@@ -345,9 +345,9 @@ class AgentController:
         Create the 'Analysis Summary' markdown using summarize_result() to avoid misleading claims.
         """
         df, meta = self._extract_latest_result_df_and_meta(
-            trace, context, dataset_id)
+            trace, context, dataset_id, question)
         safe_text = summarize_result(
-            df, meta) if df is not None else "No rows returned."
+            df, meta, question) if df is not None else "No rows returned."
         parts = [
             "# Analysis Summary",
             f"**Question:** {question}",
@@ -357,28 +357,94 @@ class AgentController:
         ]
         return "\n".join(parts) + "\n"
 
-    def _extract_latest_result_df_and_meta(self, trace: Dict[str, Any], context: Context, dataset_id: str):
+    def _extract_latest_result_df_and_meta(self, trace: Dict[str, Any], context: Context, dataset_id: str, question: str = ""):
         """
         Best-effort to locate the latest DataFrame produced during the run and provide meta
         (like is_aggregate, group_by) for summarize_result(). Falls back to the original dataset.
+
+        Priority order:
+        1. Most recent aggregate result (these contain the actual analysis results)
+        2. Most recent prepare_data result
+        3. Original dataset
         """
-        # Find the most recent step that has a df_pickle_path in its result
-        steps = list(reversed(trace.get("steps", [])))
-        for s in steps:
+        steps = trace.get("steps", [])
+
+        # First pass: Look for results with percentage columns (highest priority for percentage questions)
+        if question and any(kw in question.lower() for kw in ["percentage", "percent", "share"]):
+            for s in reversed(steps):
+                res = s.get("result") or {}
+                pkl = res.get("df_pickle_path")
+                if pkl:
+                    try:
+                        with open(pkl, "rb") as f:
+                            df = pickle.load(f)
+
+                        # Check if this result has percentage columns
+                        has_percentage_col = any(
+                            "percentage" in col.lower() or "percent" in col.lower()
+                            for col in df.columns
+                        )
+
+                        # For percentage questions, prioritize results with percentage columns
+                        if has_percentage_col:
+                            meta = {
+                                "is_aggregate": s.get("action") == "aggregate",
+                                "group_by": res.get("group_by") or []
+                            }
+                            return df, meta
+
+                    except Exception:
+                        continue
+
+        # Second pass: Look for the best aggregate result for summary
+        # Priority: aggregates with group_by (category breakdowns) > aggregates without group_by (totals)
+        best_aggregate = None
+        best_meta = None
+
+        for s in reversed(steps):
+            if s.get("action") == "aggregate":
+                res = s.get("result") or {}
+                pkl = res.get("df_pickle_path")
+                group_by = res.get("group_by") or []
+
+                if pkl:
+                    try:
+                        with open(pkl, "rb") as f:
+                            df = pickle.load(f)
+                        meta = {
+                            "is_aggregate": True,
+                            "group_by": group_by
+                        }
+
+                        # Prioritize aggregates with group_by (category breakdowns)
+                        if group_by:  # This has categories - highest priority
+                            return df, meta
+                        elif best_aggregate is None:  # This is a total - keep as fallback
+                            best_aggregate = df
+                            best_meta = meta
+
+                    except Exception:
+                        continue
+
+        # Return the best aggregate found (if any)
+        if best_aggregate is not None:
+            return best_aggregate, best_meta
+
+        # Second pass: Look for the most recent prepare_data or other result
+        for s in reversed(steps):
             res = s.get("result") or {}
             pkl = res.get("df_pickle_path")
             if pkl:
                 try:
                     with open(pkl, "rb") as f:
                         df = pickle.load(f)
+                    meta = {}
+                    if s.get("action") == "aggregate":
+                        meta["is_aggregate"] = True
+                        meta["group_by"] = res.get("group_by") or []
+                    return df, meta
                 except Exception:
-                    df = None
-
-                meta: Dict[str, Any] = {}
-                if s.get("action") == "aggregate":
-                    meta["is_aggregate"] = True
-                    meta["group_by"] = res.get("group_by") or []
-                return df, meta
+                    continue
 
         # Fallback: use the original dataset (helps compose a minimal, true statement)
         dataset_path = self.data_dir / f"{dataset_id}.csv"

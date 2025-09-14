@@ -48,7 +48,7 @@ class PythonREPLTool:
 
             if looks_like_date or s.dtype == "object":
                 try:
-                    parsed = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+                    parsed = pd.to_datetime(s, errors="coerce")
                 except Exception:
                     parsed = pd.to_datetime(s, errors="coerce")
                 # treat as date if name suggests it OR parsing succeeds for enough rows
@@ -277,10 +277,40 @@ class PythonREPLTool:
                 new_name = new_name.strip()
                 if old_name in df.columns:
                     df = df.rename(columns={old_name: new_name})
-                    
+
+        elif operation.startswith("calculate:"):
+            # Format: calculate: column_name = expression
+            calc_spec = operation.split(":", 1)[1].strip()
+            if "=" in calc_spec:
+                try:
+                    # This is a simple implementation - we could expand this to handle more complex calculations
+                    # For now, handle percentage calculations specifically
+                    if "percentage" in calc_spec and "*" in calc_spec and "100" in calc_spec:
+                        # Handle percentage = (total_revenue / overall_revenue) * 100
+                        left, right = calc_spec.split("=", 1)
+                        col_name = left.strip()
+                        expr = right.strip()
+
+                        # Parse simple percentage expressions
+                        if "(" in expr and ")" in expr and "/" in expr and "*" in expr:
+                            # Extract variables from expression like (total_revenue / overall_revenue) * 100
+                            match = re.search(r'\(\s*(\w+)\s*/\s*(\w+)\s*\)\s*\*\s*(\d+)', expr)
+                            if match:
+                                numerator = match.group(1)
+                                denominator = match.group(2)
+                                multiplier = float(match.group(3))
+
+                                if numerator in df.columns and denominator in df.columns:
+                                    df[col_name] = (df[numerator] / df[denominator]) * multiplier
+                        logger.info(f"Applied calculation: {calc_spec}")
+                    else:
+                        logger.warning(f"Complex calculation not supported: {calc_spec}")
+                except Exception as e:
+                    logger.error(f"Calculation failed: {calc_spec}, error: {e}")
+
         else:
             logger.warning(f"Unknown operation: {operation}")
-            
+
         return df
 
     def _validate_code(self, code: str) -> None:
@@ -445,8 +475,26 @@ class PythonREPLTool:
         return t
 
     def _eval_simple_predicate(self, df: pd.DataFrame, pred: str) -> pd.Series:
-        """Evaluate one predicate like "col >= 5", "date BETWEEN '2023-01-01' AND '2023-12-31'"."""
+        """Evaluate one predicate like "col >= 5", "date BETWEEN '2023-01-01' AND '2023-12-31'", "col IN ('a', 'b')"."""
         p = pred.strip()
+
+        # IN operator (e.g., "product_category IN ('Electronics', 'Books', 'Home')" or "product_category in ['Electronics', 'Books', 'Home']")
+        if " IN " in p.upper():
+            # Handle both parentheses and square brackets
+            match = re.search(r'(.+?)\s+IN\s*[\(\[](.+?)[\)\]]', p, re.IGNORECASE)
+            if match:
+                col = match.group(1).strip()
+                values_str = match.group(2).strip()
+                if col not in df.columns:
+                    return pd.Series(True, index=df.index)
+
+                # Parse the values inside parentheses/brackets
+                values = []
+                for val in values_str.split(','):
+                    val = val.strip().strip("'\"")
+                    values.append(val)
+
+                return df[col].isin(values)
 
         # BETWEEN
         if " BETWEEN " in p.upper():
