@@ -92,12 +92,21 @@ class AgentController:
             trace = self._execute_plan(
                 plan, context, progress_cb=progress_cb, base_progress=20, end_progress=85)
 
-            # Step 4: Generate SAFE summary (replaces file_io.generate_summary)
-            summary_path = Path(context.run_dir) / "summary.md"
-            safe_md = self._build_safe_summary_md(
-                question, dataset_id, trace, context)
-            summary_path.write_text(safe_md, encoding="utf-8")
-            summary_result = {"summary_path": str(summary_path)}
+            # Step 4: Generate LLM-based summary
+            try:
+                # Try LLM-based summary first for better insights
+                from ..tools.file_io import FileIOTool
+                file_tool = FileIOTool(str(Path(context.run_dir).parent))
+                summary_result = file_tool.generate_summary(context)
+                logger.info("Generated LLM-based summary")
+            except Exception as e:
+                # Fallback to safe summary if LLM fails
+                logger.warning(f"LLM summary failed, using fallback: {e}")
+                summary_path = Path(context.run_dir) / "summary.md"
+                safe_md = self._build_safe_summary_md(
+                    question, dataset_id, trace, context)
+                summary_path.write_text(safe_md, encoding="utf-8")
+                summary_result = {"summary_path": str(summary_path)}
             self._report(progress_cb, 90, "Summary generated")
 
             # Step 5: Create notebook
@@ -309,7 +318,8 @@ class AgentController:
                 "type": getattr(step, 'type', 'line'),
                 "x": getattr(step, 'x', None),
                 "y": getattr(step, 'y', None),
-                "outfile": getattr(step, 'outfile', f"charts/chart_{step.id}.png")
+                "outfile": getattr(step, 'outfile', f"charts/chart_{step.id}.png"),
+                "top_n": getattr(step, 'top_n', 30)
             }
             return self.tool_router.get_tool("viz").create_chart(
                 chart_params["type"], chart_params, context

@@ -107,6 +107,80 @@ def summarize_result(df: pd.DataFrame, meta: Dict[str, Any] | None = None, quest
             # No numeric metrics; just report group count
             return f"Grouped by {', '.join(group_by)}. Returned {len(df)} groups."
 
+        # Special handling for temporal trends (monthly, quarterly, yearly)
+        temporal_cols = [col for col in group_by if col.lower() in ['month', 'quarter', 'year']]
+        if temporal_cols and question and any(kw in question.lower() for kw in ["trend", "trends", "over time", "monthly", "quarterly", "yearly", "which month", "which quarter", "which year", "what month", "highest month", "lowest month", "best month", "worst month"]):
+            temporal_col = temporal_cols[0]
+            primary_metric = metric_cols[0]
+
+            # Sort by temporal column for proper trend display
+            sdf = df.sort_values(by=temporal_col)
+
+            if len(sdf) > 0:
+                # Calculate comprehensive trend analysis
+                first_value = sdf[primary_metric].iloc[0]
+                last_value = sdf[primary_metric].iloc[-1]
+                highest_period = sdf.loc[sdf[primary_metric].idxmax()]
+                lowest_period = sdf.loc[sdf[primary_metric].idxmin()]
+
+                # Calculate percentage changes
+                total_change_pct = ((last_value - first_value) / first_value) * 100 if first_value != 0 else 0
+                peak_vs_trough_pct = ((highest_period[primary_metric] - lowest_period[primary_metric]) / lowest_period[primary_metric]) * 100 if lowest_period[primary_metric] != 0 else 0
+
+                # Determine overall trend direction
+                if abs(total_change_pct) < 5:
+                    trend_desc = "relatively stable"
+                elif total_change_pct > 0:
+                    trend_desc = "upward trending" if total_change_pct > 15 else "moderately increasing"
+                else:
+                    trend_desc = "declining" if total_change_pct < -15 else "moderately decreasing"
+
+                # Calculate average and identify volatility
+                avg_value = sdf[primary_metric].mean()
+                volatility = sdf[primary_metric].std() / avg_value * 100 if avg_value != 0 else 0
+                volatility_desc = "highly volatile" if volatility > 30 else ("moderately volatile" if volatility > 15 else "stable")
+
+                # Build comprehensive summary
+                metric_name = primary_metric.replace('_', ' ').lower()
+                period_name = temporal_col.lower()
+
+                summary_parts = [
+                    f"**{period_name.title()}ly {metric_name} analysis:** ",
+                    f"The data shows a {trend_desc} pattern over {len(sdf)} {period_name}s. ",
+                    f"Started at {_fmt_val(first_value, primary_metric, question)} and ended at {_fmt_val(last_value, primary_metric, question)} "
+                ]
+
+                # Add change description
+                if abs(total_change_pct) >= 1:
+                    change_verb = "increased" if total_change_pct > 0 else "decreased"
+                    summary_parts.append(f"({change_verb} by {abs(total_change_pct):.1f}%). ")
+                else:
+                    summary_parts.append("(minimal change). ")
+
+                # Add peak/trough analysis
+                summary_parts.extend([
+                    f"Peak performance was in {highest_period[temporal_col]} with {_fmt_val(highest_period[primary_metric], primary_metric, question)}, ",
+                    f"while the lowest was {lowest_period[temporal_col]} at {_fmt_val(lowest_period[primary_metric], primary_metric, question)} ",
+                    f"(a {peak_vs_trough_pct:.1f}% difference). "
+                ])
+
+                # Add volatility and average insights
+                summary_parts.extend([
+                    f"The average {metric_name} was {_fmt_val(avg_value, primary_metric, question)} with {volatility_desc} fluctuations ",
+                    f"(CV: {volatility:.1f}%)."
+                ])
+
+                # Add standard business insights
+                if "revenue" in primary_metric.lower() or "sales" in primary_metric.lower():
+                    if total_change_pct < -10:
+                        summary_parts.append(" This declining revenue trend may require investigation into market conditions or operational changes.")
+                    elif total_change_pct > 15:
+                        summary_parts.append(" This strong growth trend indicates positive business momentum.")
+                    elif volatility > 25:
+                        summary_parts.append(" The high volatility suggests external factors significantly impacting sales performance.")
+
+                return "".join(summary_parts)
+
         # Special handling for percentage/share questions with categories
         if (question and any(kw in question.lower() for kw in ["percentage", "percent", "share"]) and
             len(metric_cols) >= 1 and len(df) <= 10):  # Small number of categories
@@ -144,11 +218,13 @@ def summarize_result(df: pd.DataFrame, meta: Dict[str, Any] | None = None, quest
                 category_results = []
                 for _, row in sdf.iterrows():
                     category = g_label(row)
-                    percentage = (row["total_revenue"] / total) * 100
-                    value = f"{percentage:.1f}%"
+                    revenue = row["total_revenue"]
+                    percentage = (revenue / total) * 100
+                    # Show both absolute value and percentage
+                    value = f"{_fmt_val(revenue, 'total_revenue', question)} ({percentage:.1f}%)"
                     category_results.append(f"{category}: {value}")
 
-                return f"Revenue breakdown by category: " + ", ".join(category_results) + f". ({len(df)} categories total)"
+                return f"Regional revenue analysis: " + ", ".join(category_results) + f". Total across {len(df)} regions: {_fmt_val(total, 'total_revenue', question)}."
 
             else:
                 # Fallback to showing raw values
@@ -165,7 +241,70 @@ def summarize_result(df: pd.DataFrame, meta: Dict[str, Any] | None = None, quest
 
                 return f"Revenue breakdown by category: " + ", ".join(category_results) + f". ({len(df)} categories total)"
 
-        # Default groupby reporting for non-percentage questions
+        # Special handling for "top N" questions - extract N dynamically
+        if question and any(kw in question.lower() for kw in ["top", "best", "highest", "most", "largest", "worst", "lowest", "smallest"]):
+            # Extract N from various patterns like "top 5", "best 10", "highest 3", "worst 2", etc.
+            import re
+            patterns = [
+                r'\b(?:top|best|highest|most|largest|first|biggest)\s+(\d+)\b',
+                r'\b(?:worst|lowest|smallest|bottom)\s+(\d+)\b',
+                r'\btop-(\d+)\b',  # hyphenated form
+            ]
+
+            show_n = None
+            question_lower = question.lower()
+
+            for pattern in patterns:
+                match = re.search(pattern, question_lower)
+                if match:
+                    n = int(match.group(1))
+                    if 1 <= n <= 100:  # reasonable bounds
+                        show_n = n
+                        break
+
+            # Default if pattern found but no number extracted
+            if show_n is None:
+                show_n = min(len(df), 10)
+
+            primary_metric = metric_cols[0]
+            sdf = df.sort_values(by=primary_metric, ascending=False).head(show_n)
+
+            def g_label(row):
+                return ", ".join(f"{row[g]}" for g in group_by if g in df.columns)
+
+            total_value = df[primary_metric].sum()
+
+            top_results = []
+            for i, (_, row) in enumerate(sdf.iterrows(), 1):
+                item_name = g_label(row)
+                value = row[primary_metric]
+                percentage = (value / total_value) * 100
+                formatted_value = _fmt_val(value, primary_metric, question)
+                top_results.append(f"{i}. {item_name}: {formatted_value} ({percentage:.1f}%)")
+
+            # Add insights about the top results
+            if len(top_results) > 0:
+                top_value = sdf.iloc[0][primary_metric]
+                top_item = g_label(sdf.iloc[0])
+                top_percentage = (top_value / total_value) * 100
+
+                summary_parts = [
+                    f"Top {show_n} results by {primary_metric.replace('_', ' ')}: ",
+                    ", ".join(top_results),
+                    f". {top_item} leads with {top_percentage:.1f}% of total."
+                ]
+
+                if show_n < len(df):
+                    remaining = len(df) - show_n
+                    top_n_total = sdf[primary_metric].sum()
+                    top_n_percentage = (top_n_total / total_value) * 100
+                    summary_parts.append(f" These top {show_n} account for {top_n_percentage:.1f}% of all {primary_metric.replace('_', ' ')} ({remaining} others).")
+
+                return "".join(summary_parts)
+            else:
+                return f"Top {show_n} results: " + ", ".join(top_results) + "."
+
+        # Default groupby reporting for non-top-N questions
         snippets: List[str] = []
         for metric in metric_cols[:2]:  # cap to two metrics to avoid verbosity
             sdf = df.sort_values(by=metric, ascending=False)

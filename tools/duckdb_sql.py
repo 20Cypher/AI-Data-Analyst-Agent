@@ -174,9 +174,20 @@ class DuckDBTool:
             if not metrics:
                 raise ValueError("At least one metric is required for aggregation")
 
-            # Resolve dataset path & build the minimal source map
-            dataset_path = self._dataset_path(context.dataset_id)
-            sources = {"data": str(dataset_path)}
+            # Check for prepared data first, fallback to original dataset
+            prepared_data_path = Path(context.run_dir) / "prepared_data.pkl"
+            if prepared_data_path.exists():
+                # Load prepared data and convert to temporary CSV for DuckDB
+                import pandas as pd
+                prepared_df = pd.read_pickle(prepared_data_path)
+                temp_csv_path = Path(context.run_dir) / "temp_prepared_data.csv"
+                prepared_df.to_csv(temp_csv_path, index=False)
+                sources = {"data": str(temp_csv_path)}
+                logger.info(f"Using prepared data with {len(prepared_df.columns)} columns: {list(prepared_df.columns)}")
+            else:
+                # Fallback to original dataset
+                dataset_path = self._dataset_path(context.dataset_id)
+                sources = {"data": str(dataset_path)}
 
             # Discover schema columns so we can validate group_by & metrics
             conn = self._connect()

@@ -12,6 +12,7 @@ venv/
 
 # ========== Project outputs ===========
 artifacts/
+outputs/
 
 # ========= Notebooks & editor noise ============
 *.ipynb_checkpoints/

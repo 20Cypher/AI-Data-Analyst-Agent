@@ -48,9 +48,27 @@ class PythonREPLTool:
 
             if looks_like_date or s.dtype == "object":
                 try:
-                    parsed = pd.to_datetime(s, errors="coerce")
+                    # Try common date formats first to avoid warnings
+                    if s.dtype == "object" and len(s) > 0:
+                        sample = str(s.iloc[0]) if not pd.isna(s.iloc[0]) else ""
+                        if "-" in sample and len(sample) == 10:  # YYYY-MM-DD format
+                            parsed = pd.to_datetime(s, format="%Y-%m-%d", errors="coerce")
+                        else:
+                            # Suppress dateutil warnings for unclear formats
+                            import warnings
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+                                parsed = pd.to_datetime(s, errors="coerce")
+                    else:
+                        import warnings
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            parsed = pd.to_datetime(s, errors="coerce")
                 except Exception:
-                    parsed = pd.to_datetime(s, errors="coerce")
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        parsed = pd.to_datetime(s, errors="coerce")
                 # treat as date if name suggests it OR parsing succeeds for enough rows
                 if self._is_dateish(col) or parsed.notna().mean() > 0.6:
                     df[col] = parsed
@@ -307,6 +325,48 @@ class PythonREPLTool:
                         logger.warning(f"Complex calculation not supported: {calc_spec}")
                 except Exception as e:
                     logger.error(f"Calculation failed: {calc_spec}, error: {e}")
+
+        elif operation == "extract_month" or operation.startswith("extract_month"):
+            # Extract month (YYYY-MM format) from date columns
+            date_cols = []
+            for col in df.columns:
+                if self._is_dateish(col) or pd.api.types.is_datetime64_any_dtype(df[col]):
+                    date_cols.append(col)
+
+            if date_cols:
+                date_col = date_cols[0]  # Use first date column
+                df['month'] = df[date_col].dt.to_period('M').astype(str)
+                logger.info(f"Extracted month from {date_col}")
+            else:
+                logger.warning("No date column found for month extraction")
+
+        elif operation == "extract_year" or operation.startswith("extract_year"):
+            # Extract year from date columns
+            date_cols = []
+            for col in df.columns:
+                if self._is_dateish(col) or pd.api.types.is_datetime64_any_dtype(df[col]):
+                    date_cols.append(col)
+
+            if date_cols:
+                date_col = date_cols[0]  # Use first date column
+                df['year'] = df[date_col].dt.year.astype(str)
+                logger.info(f"Extracted year from {date_col}")
+            else:
+                logger.warning("No date column found for year extraction")
+
+        elif operation == "extract_quarter" or operation.startswith("extract_quarter"):
+            # Extract quarter from date columns
+            date_cols = []
+            for col in df.columns:
+                if self._is_dateish(col) or pd.api.types.is_datetime64_any_dtype(df[col]):
+                    date_cols.append(col)
+
+            if date_cols:
+                date_col = date_cols[0]  # Use first date column
+                df['quarter'] = df[date_col].dt.to_period('Q').astype(str)
+                logger.info(f"Extracted quarter from {date_col}")
+            else:
+                logger.warning("No date column found for quarter extraction")
 
         else:
             logger.warning(f"Unknown operation: {operation}")

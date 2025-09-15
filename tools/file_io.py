@@ -110,31 +110,58 @@ class FileIOTool:
     def _format_context_for_summary(self, context: Any) -> str:
         lines = [f"Dataset: {context.dataset_id}"]
 
-        # Computed values (flat)
+        # Add more context about the analysis
+        if hasattr(context, 'question'):
+            lines.append(f"Question: {context.question}")
+
+        # Include latest DataFrame data for analysis
+        if getattr(context, 'dataframes', None):
+            lines.append("\nDataFrame Analysis:")
+            for name, path in context.dataframes.items():
+                try:
+                    import pandas as pd
+                    df = pd.read_pickle(path)
+                    lines.append(f"- {name}: {len(df)} rows, {len(df.columns)} columns")
+                    lines.append(f"  Columns: {list(df.columns)}")
+
+                    # Add data preview for context
+                    if len(df) > 0:
+                        lines.append(f"  Sample data (first 3 rows):")
+                        sample_data = df.head(3).to_dict('records')
+                        for i, row in enumerate(sample_data, 1):
+                            row_str = ", ".join([f"{k}={v}" for k, v in row.items()][:6])  # Limit to first 6 columns
+                            lines.append(f"    Row {i}: {row_str}")
+
+                        # Add basic statistics for numeric columns
+                        numeric_cols = df.select_dtypes(include=['number']).columns
+                        if len(numeric_cols) > 0:
+                            lines.append(f"  Numeric column statistics:")
+                            for col in numeric_cols[:3]:  # Limit to first 3 numeric columns
+                                lines.append(f"    {col}: mean={df[col].mean():.2f}, min={df[col].min():.2f}, max={df[col].max():.2f}")
+
+                except Exception as e:
+                    lines.append(f"- {name}: Could not analyze ({str(e)})")
+
+        # Computed values (structured)
         if hasattr(context, 'computed_values') and context.computed_values:
-            lines.append("Computed Values:")
+            lines.append("\nComputed Results:")
             for key, value in context.computed_values.items():
-                # For nested dicts like topk/extrema show compact JSON-ish
+                # For nested dicts like topk/extrema show structured format
                 if key in ("topk", "bottomk", "extrema"):
-                    import json
-                    try:
-                        snippet = json.dumps(value, default=str)[:4000]
-                    except Exception:
-                        snippet = str(value)[:4000]
-                    lines.append(f"- {key}: {snippet}")
+                    lines.append(f"- {key}:")
+                    if isinstance(value, dict):
+                        for subkey, subvalue in value.items():
+                            if isinstance(subvalue, list) and len(subvalue) > 0:
+                                lines.append(f"  {subkey}: {len(subvalue)} items, top: {subvalue[0] if subvalue else 'None'}")
+                            else:
+                                lines.append(f"  {subkey}: {subvalue}")
                 else:
                     lines.append(f"- {key}: {value}")
 
         # Artifacts
         if getattr(context, 'artifacts', None):
-            lines.append("Generated Artifacts:")
+            lines.append("\nGenerated Artifacts:")
             for artifact_type, path in context.artifacts.items():
                 lines.append(f"- {artifact_type}: {path}")
-
-        # DataFrames
-        if getattr(context, 'dataframes', None):
-            lines.append("DataFrames:")
-            for name, path in context.dataframes.items():
-                lines.append(f"- {name}: {path}")
 
         return "\n".join(lines)
